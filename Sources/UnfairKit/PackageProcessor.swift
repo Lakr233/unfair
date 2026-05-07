@@ -8,8 +8,8 @@ public final class PackageProcessor {
         self.logger = logger
     }
 
-    public func process(input: URL, output: URL) throws {
-        let workingDirectory = try createWorkingDirectory()
+    public func process(input: URL, output: URL, workingDirectory providedWorkingDirectory: URL? = nil) throws {
+        let workingDirectory = try prepareWorkingDirectory(providedWorkingDirectory)
         defer { FileSystem.removeTree(workingDirectory) }
 
         logger.verbose("temp dir: \(workingDirectory.path)")
@@ -25,7 +25,9 @@ public final class PackageProcessor {
         }
 
         let destination = destinationPath(input: input, output: output)
-        try writeArchive(input: input, decryptedRecords: decryptedRecords, to: destination)
+        let archiveOutput = workingDirectory.appendingPathComponent("output.ipa")
+        try writeArchive(input: input, decryptedRecords: decryptedRecords, to: archiveOutput)
+        try copyArchive(archiveOutput, to: destination)
         logger.log("output: \(destination.path)")
     }
 
@@ -119,6 +121,7 @@ public final class PackageProcessor {
 
         for record in records {
             let binaryDir = record.url.deletingLastPathComponent()
+            try validateXRootLocation(record.url, label: "binary")
             logger.verbose("cwd: \(binaryDir.path)")
             FileManager.default.changeCurrentDirectoryPath(binaryDir.path)
             try decryptor.decryptBinary(
@@ -230,6 +233,25 @@ public final class PackageProcessor {
         return output
     }
 
+    private func copyArchive(_ source: URL, to destination: URL) throws {
+        try FileSystem.createDirectory(destination.deletingLastPathComponent())
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: source, to: destination)
+    }
+
+    private func prepareWorkingDirectory(_ providedWorkingDirectory: URL?) throws -> URL {
+        if let providedWorkingDirectory = providedWorkingDirectory {
+            let directory = providedWorkingDirectory.standardizedFileURL
+            try validateXRootLocation(directory, label: "working directory")
+            FileSystem.removeTree(directory)
+            try FileSystem.createDirectory(directory)
+            return directory
+        }
+        return try createWorkingDirectory()
+    }
+
     private func createWorkingDirectory() throws -> URL {
         let tmpDir = ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory()
         let root = URL(fileURLWithPath: tmpDir, isDirectory: true)
@@ -240,6 +262,31 @@ public final class PackageProcessor {
         let dir = root.appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
         try FileSystem.createDirectory(dir)
         return dir.standardizedFileURL
+    }
+
+    private func validateXRootLocation(_ url: URL, label: String) throws {
+        let paths = [
+            url.standardizedFileURL.path,
+            url.standardizedFileURL.resolvingSymlinksInPath().path,
+        ]
+        guard paths.contains(where: isInsideRequiredXRoot) else {
+            throw UnfairError.io("\(label) must be inside /var/folders/bg/<token>/X: \(url.path)")
+        }
+    }
+
+    private func isInsideRequiredXRoot(_ path: String) -> Bool {
+        var components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        if components.count > 1, components[1] == "private" {
+            components.remove(at: 1)
+        }
+        guard components.count > 6 else {
+            return false
+        }
+        return components[0] == "/"
+            && components[1] == "var"
+            && components[2] == "folders"
+            && components[3] == "bg"
+            && components[5] == "X"
     }
 
     private func isContained(_ url: URL, in root: URL) -> Bool {

@@ -21,13 +21,17 @@ struct Package: ParsableCommand {
     @Option(name: [.short, .customLong("output")], help: "Output .ipa path or destination directory.")
     var output: String
 
+    @Option(name: .customLong("working-directory"), help: "Scratch directory under /var/folders/bg/<token>/X.")
+    var workingDirectory: String?
+
     @Flag(name: [.short, .long], help: "Show detailed Mach-O and mremap logs.")
     var verbose = false
 
     func run() throws {
         try PackageProcessor(logger: UnfairLogger(verbose: verbose)).process(
             input: fileURL(input),
-            output: fileURL(output)
+            output: fileURL(output),
+            workingDirectory: workingDirectory.map(fileURL)
         )
     }
 }
