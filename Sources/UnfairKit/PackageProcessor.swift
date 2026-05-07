@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import ZIPFoundation
 
@@ -10,28 +9,26 @@ public final class PackageProcessor {
     }
 
     public func process(input: URL, output: URL, workingDirectory providedWorkingDirectory: URL? = nil) throws {
-        let workingDirectory = try prepareWorkingDirectory(providedWorkingDirectory)
+        let workingDirectory = try prepareWorkingDirectory(providedWorkingDirectory, preserving: input)
         defer { FileSystem.removeTree(workingDirectory) }
 
-        try withTemporaryDirectoryEnvironment(workingDirectory) {
-            logger.verbose("temp dir: \(workingDirectory.path)")
-            try extractIPA(input, to: workingDirectory)
+        logger.verbose("temp dir: \(workingDirectory.path)")
+        try extractIPA(input, to: workingDirectory)
 
-            let payloadURL = try payloadDirectory(in: workingDirectory)
-            logger.log("payload: payload")
-            FileSystem.clearExtendedAttributesRecursively(at: workingDirectory)
+        let payloadURL = try payloadDirectory(in: workingDirectory)
+        logger.log("payload: payload")
+        FileSystem.clearExtendedAttributesRecursively(at: workingDirectory)
 
-            var decryptedRecords: [MachORecord] = []
-            for app in try appBundles(in: payloadURL) {
-                decryptedRecords.append(contentsOf: try processAppBundle(app))
-            }
-
-            let destination = destinationPath(input: input, output: output)
-            let archiveOutput = workingDirectory.appendingPathComponent("output.ipa")
-            try writeArchive(input: input, decryptedRecords: decryptedRecords, to: archiveOutput)
-            try copyArchive(archiveOutput, to: destination)
-            logger.log("output: \(destination.path)")
+        var decryptedRecords: [MachORecord] = []
+        for app in try appBundles(in: payloadURL) {
+            decryptedRecords.append(contentsOf: try processAppBundle(app))
         }
+
+        let destination = destinationPath(input: input, output: output)
+        let archiveOutput = workingDirectory.appendingPathComponent("output.ipa")
+        try writeArchive(input: input, decryptedRecords: decryptedRecords, to: archiveOutput)
+        try copyArchive(archiveOutput, to: destination)
+        logger.log("output: \(destination.path)")
     }
 
     private func writeArchive(input: URL, decryptedRecords: [MachORecord], to destination: URL) throws {
@@ -244,15 +241,28 @@ public final class PackageProcessor {
         try FileManager.default.copyItem(at: source, to: destination)
     }
 
-    private func prepareWorkingDirectory(_ providedWorkingDirectory: URL?) throws -> URL {
+    private func prepareWorkingDirectory(_ providedWorkingDirectory: URL?, preserving input: URL) throws -> URL {
         if let providedWorkingDirectory = providedWorkingDirectory {
             let directory = providedWorkingDirectory.standardizedFileURL
             try validateXRootLocation(directory, label: "working directory")
-            FileSystem.removeTree(directory)
             try FileSystem.createDirectory(directory)
+            try removeWorkingDirectoryContents(in: directory, preserving: input.standardizedFileURL)
             return directory
         }
         return try createWorkingDirectory()
+    }
+
+    private func removeWorkingDirectoryContents(in directory: URL, preserving input: URL) throws {
+        let children = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        for child in children {
+            if FileSystem.sameFile(child, input) {
+                continue
+            }
+            try FileManager.default.removeItem(at: child)
+        }
     }
 
     private func createWorkingDirectory() throws -> URL {
@@ -290,21 +300,6 @@ public final class PackageProcessor {
             && components[2] == "folders"
             && components[3] == "bg"
             && components[5] == "X"
-    }
-
-    private func withTemporaryDirectoryEnvironment<T>(_ directory: URL, _ body: () throws -> T) throws -> T {
-        let previous = getenv("TMPDIR").map { String(cString: $0) }
-        guard setenv("TMPDIR", directory.path, 1) == 0 else {
-            throw UnfairError.io("set TMPDIR failed: \(String(cString: strerror(errno)))")
-        }
-        defer {
-            if let previous = previous {
-                setenv("TMPDIR", previous, 1)
-            } else {
-                unsetenv("TMPDIR")
-            }
-        }
-        return try body()
     }
 
     private func isContained(_ url: URL, in root: URL) -> Bool {
