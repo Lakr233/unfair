@@ -37,9 +37,18 @@ public final class PackageProcessor {
         try FileManager.default.copyItem(at: input, to: destination)
 
         let archive = try Archive(url: destination, accessMode: .update, pathEncoding: nil)
+        try removeSymlinkEntries(in: archive)
 
         for record in decryptedRecords {
             try replaceEntry(for: record, in: archive)
+        }
+    }
+
+    private func removeSymlinkEntries(in archive: Archive) throws {
+        let symlinks = archive.filter { $0.type == .symlink }
+        for entry in symlinks {
+            logger.verbose("skipped symlink in output: \(entry.path)")
+            try archive.remove(entry)
         }
     }
 
@@ -47,6 +56,10 @@ public final class PackageProcessor {
         let path = "Payload/" + record.displayPath
         guard let entry = archive[path] else {
             throw UnfairError.io("archive entry missing: \(path)")
+        }
+        guard entry.type != .symlink else {
+            logger.verbose("skipped symlink update: \(path)")
+            return
         }
 
         let attributes = entry.fileAttributes
@@ -133,24 +146,19 @@ public final class PackageProcessor {
     }
 
     private func extractIPA(_ input: URL, to tempDir: URL) throws {
-        try FileManager.default.unzipItem(at: input, to: tempDir)
-        try fixDirectoryPermissions(at: tempDir)
-    }
-
-    private func fixDirectoryPermissions(at root: URL) throws {
-        try FileSystem.chmod(root, mode: 0o755)
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: []
-        ) else {
-            return
-        }
-        for case let url as URL in enumerator {
-            let values = try url.resourceValues(forKeys: [.isDirectoryKey])
-            if values.isDirectory == true {
-                try FileSystem.chmod(url, mode: 0o755)
+        let archive = try Archive(url: input, accessMode: .read, pathEncoding: nil)
+        for entry in archive {
+            if entry.type == .symlink {
+                logger.verbose("skipped symlink on extract: \(entry.path)")
+                continue
             }
+
+            let entryURL = tempDir.appendingPathComponent(entry.path)
+            guard isContained(entryURL, in: tempDir) else {
+                throw UnfairError.io("archive entry escapes extraction directory: \(entry.path)")
+            }
+
+            _ = try archive.extract(entry, to: entryURL)
         }
     }
 
@@ -162,12 +170,17 @@ public final class PackageProcessor {
     }
 
     private func findPayload(in root: URL) -> URL? {
+        if (try? root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+            return nil
+        }
+
         let candidate = root.appendingPathComponent("Payload", isDirectory: true)
-        if (try? candidate.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+        let candidateValues = try? candidate.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        if candidateValues?.isSymbolicLink != true, candidateValues?.isDirectory == true {
             return candidate
         }
 
-        guard let children = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey]) else {
+        guard let children = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else {
             return nil
         }
         for child in children {
@@ -179,12 +192,13 @@ public final class PackageProcessor {
     }
 
     private func appBundles(in payloadURL: URL) throws -> [URL] {
-        let children = try FileManager.default.contentsOfDirectory(at: payloadURL, includingPropertiesForKeys: [.isDirectoryKey])
+        let children = try FileManager.default.contentsOfDirectory(at: payloadURL, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         let apps = try children.filter { url in
             guard url.pathExtension == "app" else {
                 return false
             }
-            return try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            return values.isSymbolicLink != true && values.isDirectory == true
         }
         guard apps.isEmpty == false else {
             throw UnfairError.io("ERROR: no Payload/*.app directory found")
@@ -217,13 +231,20 @@ public final class PackageProcessor {
     }
 
     private func createWorkingDirectory() throws -> URL {
-        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        let tmpDir = ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory()
+        let root = URL(fileURLWithPath: tmpDir, isDirectory: true)
             .deletingLastPathComponent()
             .appendingPathComponent("X", isDirectory: true)
-            .appendingPathComponent("unfair-swift", isDirectory: true)
+            .appendingPathComponent("unfair", isDirectory: true)
         try FileSystem.createDirectory(root)
         let dir = root.appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
         try FileSystem.createDirectory(dir)
         return dir.standardizedFileURL
+    }
+
+    private func isContained(_ url: URL, in root: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let rootPath = root.standardizedFileURL.path
+        return path == rootPath || path.hasPrefix(rootPath + "/")
     }
 }

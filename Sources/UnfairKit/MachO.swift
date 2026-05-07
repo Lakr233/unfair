@@ -40,7 +40,7 @@ enum MachOInspector {
     private static let cpuSubtypeArm64All = UInt32(CPU_SUBTYPE_ARM64_ALL)
 
     static func scanBinaries(appURL: URL, label: String) throws -> [MachORecord] {
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         guard let enumerator = FileManager.default.enumerator(
             at: appURL,
             includingPropertiesForKeys: keys,
@@ -52,7 +52,8 @@ enum MachOInspector {
         var records: [MachORecord] = []
         for case let url as URL in enumerator {
             let values = try url.resourceValues(forKeys: Set(keys))
-            guard values.isRegularFile == true else {
+            guard values.isSymbolicLink != true,
+                  values.isRegularFile == true else {
                 continue
             }
 

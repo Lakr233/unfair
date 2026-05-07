@@ -50,7 +50,6 @@ public final class BinaryDecryptor {
 
         logger.verbose("sinf copy: root sinf -> ./SC_Info/\(url.lastPathComponent).sinf")
         try FileManager.default.copyItem(at: rootSinf, to: destination)
-        try FileSystem.chmod(destination, mode: 0o644)
         return TemporarySinf(destination: destination)
     }
 
